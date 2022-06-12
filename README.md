@@ -18,8 +18,8 @@ Incorporating symmetry as an inductive bias into neural network architecture has
 
 ## Cite
 ```
-@inproceedings{wang2021incorporating,
-title={Incorporating Symmetry into Deep Dynamics Models for Improved Generalization},
+@inproceedings{wang2022approximately,
+title={Approximately Equivariant Networks for Imperfectly Symmetric Dynamics},
 author={Rui Wang and Robin Walters and Rose Yu},
 booktitle={International Conference on Machine Learning},
 year={2022},
