@@ -57,8 +57,8 @@ def train_epoch(train_loader, model, optimizer, loss_function):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-    train_mse = round(np.sqrt(np.mean(train_mse)),5)
-    return train_mse
+    train_rmse = round(np.sqrt(np.mean(train_mse)),5)
+    return train_rmse
 
 def eval_epoch(valid_loader, model, loss_function):
     valid_mse = []
@@ -81,8 +81,8 @@ def eval_epoch(valid_loader, model, loss_function):
             valid_mse.append(loss.item()/yy.shape[1])
         preds = np.concatenate(preds, axis = 0)  
         trues = np.concatenate(trues, axis = 0)  
-        valid_mse = round(np.sqrt(np.mean(valid_mse)), 5)
-    return valid_mse, preds, trues
+        valid_rmse = round(np.sqrt(np.mean(valid_mse)), 5)
+    return valid_rmse, preds, trues
 
 
 def RPPConv_L2(mdl, conv_wd = 1e-6, basic_wd = 1e-6):
