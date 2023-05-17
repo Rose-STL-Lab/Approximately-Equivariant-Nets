@@ -28,10 +28,10 @@ git clone -b 2.0.1 --single-branch https://github.com/tum-pbs/PhiFlow.git
 
 - Move data_prep.ipynb to the PhiFlow folder and run data_prep.ipynb to generate approximate translation, rotation and scaling symmetry smoke plume datasets.
 
-- Unfortunately, we can't release the Jetflow dataset due to policy
+- Or you can directly download preprocessed smoke plume and JetFlow datasets from [here](https://roselab1.ucsd.edu/seafile/d/8886a9ee4c5248afab26/). 
 
 ### Training
-- Train relaxed translation group convoluton, relaxed rotation steeratble CNNs and relaxed scaling steeratble CNNs.
+- Train relaxed translation group convoluton, relaxed rotation steeratble CNNs and relaxed scaling steeratble CNNs on smoke plume datasets.
 ```
 sh run.sh
 ```
