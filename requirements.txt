@@ -5,3 +5,4 @@ python=3.9.16
 cudatoolkit==11.7.64
 pip==23.0.1
 conda==4.14.0
+e2cnn
