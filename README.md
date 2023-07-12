@@ -30,10 +30,16 @@ git clone -b 2.0.1 --single-branch https://github.com/tum-pbs/PhiFlow.git
 
 - Or you can directly download preprocessed smoke plume and JetFlow datasets from [here](https://roselab1.ucsd.edu/seafile/d/8886a9ee4c5248afab26/). 
 
-### Training
+### Training on smoke plume and jet flow datasets
 - Train relaxed translation group convoluton, relaxed rotation steeratble CNNs and relaxed scaling steeratble CNNs on smoke plume and jet flow datasets.
 ```
 sh run.sh
+```
+
+### Learning Different Levels of Equivariance
+- To reproduce the Figure 4 in the paper, you first need to generate 10 small smoke plume datasets with different levels of rotational equivariance with 'data_prep.ipynb' or download the equivariance_test folder from from [here](https://roselab1.ucsd.edu/seafile/d/8886a9ee4c5248afab26/), then run
+```
+python run_equiv_test.py
 ```
 
 ## Cite
