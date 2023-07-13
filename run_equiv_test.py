@@ -10,14 +10,6 @@ from models import E2CNN, Relaxed_Rot_SteerConvNet, ConvNet, Rot_RPPNet, Lift_Ro
 from utils import Dataset, train_epoch, eval_epoch, get_lr
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-##### Expected Outputs ##### 
-# Data Equiv Errors: | [0.0, 0.17, 0.313, 0.435, 0.541, 0.63, 0.709, 0.78, 0.84, 0.896]
-# E2CNN Equiv Errors: | [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-# ConvNet Equiv Errors: | [0.033, 0.042, 0.05, 0.079, 0.085, 0.098, 0.104, 0.128, 0.133, 0.146]
-# RPP Equiv Errors: | [0.044, 0.055, 0.064, 0.064, 0.092, 0.103, 0.108, 0.125, 0.135, 0.133]
-# Lift Equiv Errors: | [0.034, 0.037, 0.056, 0.069, 0.079, 0.101, 0.086, 0.095, 0.081, 0.084]
-# RSteer Equiv Errors: | [0.122, 0.2, 0.121, 0.438, 0.421, 0.274, 0.358, 0.623, 0.654, 0.692]
-############################
 
 print("Data Equiv Errors: | {}".format([0.0, 0.17, 0.313, 0.435, 0.541, 0.63, 0.709, 0.78, 0.84, 0.896]))
 
