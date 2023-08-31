@@ -349,140 +349,503 @@ class Constrained_Rot_LCNet(nn.Module):
     
  
 ############ Relaxed Group Convolution ############
+class Relaxed_LiftingConvolution(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 group_order,
+                 num_filter_banks,
+                 activation = True
+                 ):
+        super(Relaxed_LiftingConvolution, self).__init__()
 
-class Relaxed_Reg_GroupConv(nn.Module):
-    def __init__(self, in_reps, out_reps, kernel_size, N, num_filter_banks, first_layer = False, final_layer = False):
-        super(Relaxed_Reg_GroupConv, self).__init__()
         self.num_filter_banks = num_filter_banks
-        self.N = N
-        
-        self.first_layer = first_layer
-        self.final_layer = final_layer
-
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.kernel_size = kernel_size
-        self.out_reps = out_reps
-        self.in_reps = in_reps
+        self.group_order = group_order
+        self.activation = activation
+
+        self.combination_weights = torch.nn.Parameter(torch.ones(num_filter_banks, group_order).float()/num_filter_banks)
+
+        # Initialize an unconstrained kernel.
+        self.weight = torch.nn.Parameter(torch.zeros(self.num_filter_banks, # Additional dimension
+                                                     self.out_channels,
+                                                     self.in_channels,
+                                                     self.kernel_size,
+                                                     self.kernel_size))
+        stdv = np.sqrt(1/(self.in_channels*self.kernel_size*self.kernel_size))
+        self.weight.data.uniform_(-stdv, stdv)
+
+        # If combination_weights are equal values, then the model is still equivariant
+        # self.combination_weights.data.uniform_(-stdv, stdv)
         
-        stdv = np.sqrt(1/(self.in_reps))
+    def generate_filter_bank(self):
+        """ Obtain a stack of rotated filters"""
+        weights = self.weight.reshape(self.num_filter_banks*self.out_channels,
+                                      self.in_channels,
+                                      self.kernel_size,
+                                      self.kernel_size)
+        filter_bank = torch.stack([rot_img(weights, -np.pi*2/self.group_order*i)
+                                   for i in range(self.group_order)])
+        filter_bank = filter_bank.transpose(0,1).reshape(self.num_filter_banks, # Additional dimension
+                                                         self.out_channels,
+                                                         self.group_order,
+                                                         self.in_channels,
+                                                         self.kernel_size,
+                                                         self.kernel_size)
+        return filter_bank
+
+
+    def forward(self, x):
+        # input shape: [bz, #in, h, w]
+        # output shape: [bz, #out, group order, h, w]
+
+        # generate filter bank given input group order
+        filter_bank = self.generate_filter_bank()
+
+        # for each rotation, we have a linear combination of multiple filters with different coefficients.
+        relaxed_conv_weights = torch.einsum("na, noa... -> oa...", self.combination_weights, filter_bank)
+
+        # concatenate the first two dims before convolution.
+        # ==============================
+        x = F.conv2d(
+            input=x,
+            weight=relaxed_conv_weights.reshape(
+                self.out_channels * self.group_order,
+                self.in_channels,
+                self.kernel_size,
+                self.kernel_size
+            ),
+            padding = (self.kernel_size-1)//2
+        )
+        # ==============================
+
+        # reshape output signal to shape [bz, #out, group order, h, w].
+        # ==============================
+        x = x.view(
+            x.shape[0],
+            self.out_channels,
+            self.group_order,
+            x.shape[-1],
+            x.shape[-2]
+        )
+        # ==============================
+
+        if self.activation:
+            return F.relu(x)
+        return x
+
         
-        ## If this is first layer, rho_1 -> rho_reg
-        if self.first_layer:
-            self.transform_weights = nn.Parameter(torch.ones(in_reps, 1).float().to(device)/2)
-            #self.transform_weights.data.uniform_(-stdv, stdv)
-            
-        if self.final_layer == True:
-            self.final_w = nn.Parameter(torch.randn(out_reps).to(device))
-            self.final_w.data.uniform_(-stdv, stdv)
+class Relaxed_GroupConv(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 group_order,
+                 num_filter_banks,
+                 activation = True
+                ):
+
+        super(Relaxed_GroupConv, self).__init__()
+
+        self.num_filter_banks = num_filter_banks
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.group_order = group_order
+        self.activation = activation
+
 
         ## Initialize weights
-        self.combination_weights = nn.Parameter(torch.ones(self.N, self.num_filter_banks).float().to(device)/self.num_filter_banks)
-        self.combination_weights.data.uniform_(-stdv, stdv)
-        
-        self.weights = nn.Parameter(torch.randn(self.num_filter_banks, out_reps, self.N, in_reps, self.N, kernel_size, kernel_size).to(device))
-        self.weights.data.uniform_(-stdv, stdv)
+        self.combination_weights = torch.nn.Parameter(torch.ones(group_order, num_filter_banks).float()/num_filter_banks/group_order)
+        self.weight = torch.nn.Parameter(torch.randn(self.num_filter_banks, ##additional dimension
+                                                       self.out_channels,
+                                                       self.in_channels,
+                                                       self.group_order,
+                                                       self.kernel_size,
+                                                       self.kernel_size))
 
-        self.bias = nn.Parameter(torch.zeros(out_reps, self.N).to(device))
-        self.bias.data.uniform_(-stdv, stdv)
-        
-        self.batch_norm = nn.BatchNorm2d(out_reps*self.N)
-        
-    def permute(self, weights, bias):
-        augmented_weights = []
-        augmented_bias = []
-        
-        for i in range(self.N):
-            permuted_indices = list(np.roll(np.arange(0, self.N, 1), shift = i))
+        stdv = np.sqrt(1/(self.in_channels*self.kernel_size*self.kernel_size))
+        self.weight.data.uniform_(-stdv, stdv)
 
-            temp_w = weights[i, :, :, :, permuted_indices,...][:, permuted_indices]
-            temp_w = temp_w.reshape(self.out_reps*self.N, self.in_reps, self.N, self.kernel_size, self.kernel_size) 
-            temp_w = temp_w.reshape(self.out_reps*self.N, self.in_reps*self.N, self.kernel_size, self.kernel_size) 
-            temp_b = bias[:, permuted_indices]
+        # If combination_weights are equal values, then the model is still equivariant
+        # self.combination_weights.data.uniform_(-stdv, stdv)
+
+
+    def generate_filter_bank(self):
+        """ Obtain a stack of rotated and cyclic shifted filters"""
+        filter_bank = []
+        weights = self.weight.reshape(self.num_filter_banks*self.out_channels*self.in_channels,
+                                      self.group_order,
+                                      self.kernel_size,
+                                      self.kernel_size)
+
+        for i in range(self.group_order):
+            # planar rotation
+            rotated_filter = rot_img(weights, -np.pi*2/self.group_order*i)
+
+            # cyclic shift
+            shifted_indices = torch.roll(torch.arange(0, self.group_order, 1), shifts = i)
+            shifted_rotated_filter = rotated_filter[:,shifted_indices]
             
-            augmented_weights.append(temp_w)
-            augmented_bias.append(temp_b.reshape(-1))
             
-        return torch.cat(augmented_weights, dim = 0), torch.cat(augmented_bias, dim = 0)
+            filter_bank.append(shifted_rotated_filter.reshape(self.num_filter_banks,
+                                                    self.out_channels,
+                                                    self.in_channels,
+                                                    self.group_order,
+                                                    self.kernel_size,
+                                                    self.kernel_size))
+        # stack
+        filter_bank = torch.stack(filter_bank).permute(1,2,0,3,4,5,6)
+        return filter_bank
+
+    def forward(self, x):
+
+        filter_bank = self.generate_filter_bank()
+
+        relaxed_conv_weights = torch.einsum("na, aon... -> on...", self.combination_weights, filter_bank)
+
+        x = torch.nn.functional.conv2d(
+            input=x.reshape(
+                x.shape[0],
+                x.shape[1] * x.shape[2],
+                x.shape[3],
+                x.shape[4]
+                ),
+            weight=relaxed_conv_weights.reshape(
+                self.out_channels * self.group_order,
+                self.in_channels * self.group_order,
+                self.kernel_size,
+                self.kernel_size
+            ),
+            padding = (self.kernel_size-1)//2
+        )
+
+                # Reshape signal back [bz, #out * g_order, h, w] -> [bz, out, g_order, h, w]
+        x = x.view(x.shape[0], self.out_channels, self.group_order, x.shape[-2], x.shape[-1])
+        # ========================
+
+        return x
+
+class Relaxed_LiftingConvolution(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 group_order,
+                 num_filter_banks,
+                 activation = True
+                 ):
+        super(Relaxed_LiftingConvolution, self).__init__()
+
+        self.num_filter_banks = num_filter_banks
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.group_order = group_order
+        self.activation = activation
+
+        self.combination_weights = torch.nn.Parameter(torch.ones(num_filter_banks, group_order).float()/num_filter_banks)
+
+        # Initialize an unconstrained kernel.
+        self.weight = torch.nn.Parameter(torch.zeros(self.num_filter_banks, # Additional dimension
+                                                     self.out_channels,
+                                                     self.in_channels,
+                                                     self.kernel_size,
+                                                     self.kernel_size))
+        stdv = np.sqrt(1/(self.in_channels*self.kernel_size*self.kernel_size))
+        self.weight.data.uniform_(-stdv, stdv)
+
+        # If combination_weights are equal values, then the model is still equivariant
+        # self.combination_weights.data.uniform_(-stdv, stdv)
+        
+    def generate_filter_bank(self):
+        """ Obtain a stack of rotated filters"""
+        weights = self.weight.reshape(self.num_filter_banks*self.out_channels,
+                                      self.in_channels,
+                                      self.kernel_size,
+                                      self.kernel_size)
+        filter_bank = torch.stack([rot_img(weights, -np.pi*2/self.group_order*i)
+                                   for i in range(self.group_order)])
+        filter_bank = filter_bank.transpose(0,1).reshape(self.num_filter_banks, # Additional dimension
+                                                         self.out_channels,
+                                                         self.group_order,
+                                                         self.in_channels,
+                                                         self.kernel_size,
+                                                         self.kernel_size)
+        return filter_bank
+
+
+    def forward(self, x):
+        # input shape: [bz, #in, h, w]
+        # output shape: [bz, #out, group order, h, w]
+
+        # generate filter bank given input group order
+        filter_bank = self.generate_filter_bank()
+
+        # for each rotation, we have a linear combination of multiple filters with different coefficients.
+        relaxed_conv_weights = torch.einsum("na, noa... -> oa...", self.combination_weights, filter_bank)
+
+        # concatenate the first two dims before convolution.
+        # ==============================
+        x = F.conv2d(
+            input=x,
+            weight=relaxed_conv_weights.reshape(
+                self.out_channels * self.group_order,
+                self.in_channels,
+                self.kernel_size,
+                self.kernel_size
+            ),
+            padding = (self.kernel_size-1)//2
+        )
+        # ==============================
+
+        # reshape output signal to shape [bz, #out, group order, h, w].
+        # ==============================
+        x = x.view(
+            x.shape[0],
+            self.out_channels,
+            self.group_order,
+            x.shape[-1],
+            x.shape[-2]
+        )
+        # ==============================
+
+        if self.activation:
+            return F.relu(x)
+        return x
     
-    def rot_vector(self, inp, theta):
-        #inp shape: c x 2 x 64 x 64
-        theta = torch.tensor(theta).float().to(device)
-        rot_matrix = torch.tensor([[torch.cos(theta), -torch.sin(theta)], [torch.sin(theta), torch.cos(theta)]]).float().to(device)
-        out = torch.einsum("ab, bc... -> ac...",(rot_matrix, inp.transpose(0,1))).transpose(0,1)
-        return out
+class RelaxedGroupEquivariantCNN(torch.nn.Module):
+    
+    def __init__(self, in_channels, out_channels, kernel_size, hidden_dim, group_order, num_gconvs, num_filter_banks, vel_inp = True):
+        super().__init__()
 
-    def rot_img(self, x, theta):
-        theta = torch.tensor(theta).float().to(device)
-        get_rot_mat = torch.tensor([[torch.cos(theta), -torch.sin(theta), 0],
-                             [torch.sin(theta), torch.cos(theta), 0]]).float().to(device)
-        rot_mat = get_rot_mat[None, ...].float().repeat(x.shape[0],1,1)
-        grid = F.affine_grid(rot_mat, x.size()).float()
-        x = F.grid_sample(x, grid)
-        return x.float()
+        # First transform \rho_1 to regular representations. 
+        theta = torch.tensor(2*np.pi/group_order).float()
+        self.lift_coefs = torch.tensor([[torch.cos(theta*i), torch.sin(theta*i)] for i in range(group_order)]).float().to(device)
+        
+        if vel_inp:
+            self.gconvs = [Relaxed_GroupConv(in_channels = in_channels,
+                                            out_channels = hidden_dim,
+                                            kernel_size = kernel_size,
+                                            group_order = group_order,
+                                            num_filter_banks = num_filter_banks,
+                                            activation = True)]
+        else:
+            self.gconvs = [Relaxed_LiftingConvolution(in_channels = in_channels,
+                                                      out_channels = hidden_dim,
+                                                      kernel_size = kernel_size,
+                                                      group_order = group_order,
+                                                      num_filter_banks = num_filter_banks,
+                                                      activation = True)]
+
+        for i in range(num_gconvs-2):
+            self.gconvs.append(Relaxed_GroupConv(in_channels = hidden_dim,
+                                                out_channels = hidden_dim,
+                                                kernel_size = kernel_size,
+                                                group_order = group_order,
+                                                num_filter_banks = num_filter_banks,
+                                                activation = True))
+            
+        self.gconvs.append(Relaxed_GroupConv(in_channels = hidden_dim,
+                                            out_channels = out_channels,
+                                            kernel_size = kernel_size,
+                                            group_order = group_order,
+                                            num_filter_banks = num_filter_banks,
+                                            activation = False))
+
+        self.gconvs = torch.nn.Sequential(*self.gconvs)
+
+
+        self.vel_inp = vel_inp
+        self.group_order = group_order
+
+    def forward(self, x, target_length = 1):
+        if self.vel_inp and len(x.shape) == 4:
+            x = x.reshape(x.shape[0], x.shape[1]//2, 2, x.shape[2], x.shape[3])
+        preds = []
+        for i in range(target_length):
+            if self.vel_inp:
+                x = torch.einsum("bivhw, nv->binhw", x, self.lift_coefs)
+            out = self.gconvs(x)
+            if self.vel_inp:
+                out = torch.einsum("binhw, nv->bivhw", out, self.lift_coefs)
+            else:
+                out = out.mean(2)
+            x = torch.cat([x[:, 1:], out], 1)
+            preds.append(out)
+            
+        outs = torch.cat(preds, dim=1)
+        outs = outs.reshape(outs.shape[0], -1, outs.shape[-2], outs.shape[-1])
+        return outs
+
+    
+def rot_img(x, theta):
+    """ Rotate 2D images
+    Args:
+        x : input images with shape [N, C, H, W]
+        theta: angle
+    Returns:
+        rotated images
+    """
+    # Rotation Matrix (2 x 3)
+    rot_mat = torch.FloatTensor([[np.cos(theta), -np.sin(theta), 0],
+                                 [np.sin(theta), np.cos(theta), 0]]).to(x.device)
+
+    # The affine transformation matrices should have the shape of N x 2 x 3
+    rot_mat = rot_mat.repeat(x.shape[0],1,1)
+
+    # Obtain transformed grid
+    # grid is the coordinates of pixels for rotated image
+    # F.affine_grid assumes the origin is in the middle
+    # and it rotates the positions of the coordinates
+    # r(f(x)) = f(r^-1 x)
+    grid = F.affine_grid(rot_mat, x.size(), align_corners=False).float().to(x.device)
+    x = F.grid_sample(x, grid)
+    return x
+
+def rot_vector(x, theta):
+    #x has the shape [c x 2 x h x w]
+    rho = torch.FloatTensor([[np.cos(theta), -np.sin(theta)],
+                             [np.sin(theta), np.cos(theta)]])
+    out = torch.einsum("ab, bc... -> ac...",(rho, x.transpose(0,1))).transpose(0,1)
+    return out
+    
+# class Relaxed_Reg_GroupConv(nn.Module):
+#     def __init__(self, in_reps, out_reps, kernel_size, N, num_filter_banks, first_layer = False, final_layer = False):
+#         super(Relaxed_Reg_GroupConv, self).__init__()
+#         self.num_filter_banks = num_filter_banks
+#         self.N = N
+        
+#         self.first_layer = first_layer
+#         self.final_layer = final_layer
+
+#         self.kernel_size = kernel_size
+#         self.out_reps = out_reps
+#         self.in_reps = in_reps
+        
+#         stdv = np.sqrt(1/(self.in_reps))
+        
+#         ## If this is first layer, rho_1 -> rho_reg
+#         if self.first_layer:
+#             self.transform_weights = nn.Parameter(torch.ones(in_reps, 1).float().to(device)/2)
+#             #self.transform_weights.data.uniform_(-stdv, stdv)
+            
+#         if self.final_layer == True:
+#             self.final_w = nn.Parameter(torch.randn(out_reps).to(device))
+#             self.final_w.data.uniform_(-stdv, stdv)
+
+#         ## Initialize weights
+#         self.combination_weights = nn.Parameter(torch.ones(self.N, self.num_filter_banks).float().to(device)/self.num_filter_banks)
+#         self.combination_weights.data.uniform_(-stdv, stdv)
+        
+#         self.weights = nn.Parameter(torch.randn(self.num_filter_banks, out_reps, self.N, in_reps, self.N, kernel_size, kernel_size).to(device))
+#         self.weights.data.uniform_(-stdv, stdv)
+
+#         self.bias = nn.Parameter(torch.zeros(out_reps, self.N).to(device))
+#         self.bias.data.uniform_(-stdv, stdv)
+        
+#         self.batch_norm = nn.BatchNorm2d(out_reps*self.N)
+        
+#     def permute(self, weights, bias):
+#         augmented_weights = []
+#         augmented_bias = []
+        
+#         for i in range(self.N):
+#             permuted_indices = list(np.roll(np.arange(0, self.N, 1), shift = i))
+
+#             temp_w = weights[i, :, :, :, permuted_indices,...][:, permuted_indices]
+#             temp_w = temp_w.reshape(self.out_reps*self.N, self.in_reps, self.N, self.kernel_size, self.kernel_size) 
+#             temp_w = temp_w.reshape(self.out_reps*self.N, self.in_reps*self.N, self.kernel_size, self.kernel_size) 
+#             temp_b = bias[:, permuted_indices]
+            
+#             augmented_weights.append(temp_w)
+#             augmented_bias.append(temp_b.reshape(-1))
+            
+#         return torch.cat(augmented_weights, dim = 0), torch.cat(augmented_bias, dim = 0)
+    
+#     def rot_vector(self, inp, theta):
+#         #inp shape: c x 2 x 64 x 64
+#         theta = torch.tensor(theta).float().to(device)
+#         rot_matrix = torch.tensor([[torch.cos(theta), -torch.sin(theta)], [torch.sin(theta), torch.cos(theta)]]).float().to(device)
+#         out = torch.einsum("ab, bc... -> ac...",(rot_matrix, inp.transpose(0,1))).transpose(0,1)
+#         return out
+
+#     def rot_img(self, x, theta):
+#         theta = torch.tensor(theta).float().to(device)
+#         get_rot_mat = torch.tensor([[torch.cos(theta), -torch.sin(theta), 0],
+#                              [torch.sin(theta), torch.cos(theta), 0]]).float().to(device)
+#         rot_mat = get_rot_mat[None, ...].float().repeat(x.shape[0],1,1)
+#         grid = F.affine_grid(rot_mat, x.size()).float()
+#         x = F.grid_sample(x, grid)
+#         return x.float()
  
-    def forward(self, x):
+#     def forward(self, x):
         
-        if self.first_layer:
-            xs = []
-            x = x.reshape(x.shape[0], x.shape[1]//2, 2, x.shape[-2], x.shape[-1])
-            theta = torch.tensor(2*np.pi/self.N).float()
-            for i in range(self.N):
-                lift = torch.tensor([torch.cos(theta*i), torch.sin(theta*i)]).float().to(device)
-                lift_weights = torch.einsum("ab, b -> ab", self.transform_weights.repeat(1,2), lift)
-                xs.append(torch.einsum("abcde, bc -> abde", x, lift_weights).unsqueeze(2))
-            xs = torch.cat(xs, dim = 2)
-            xs = xs.reshape(xs.shape[0], xs.shape[1]*xs.shape[2], xs.shape[3], xs.shape[4])
-        else:
-            xs = x
+#         if self.first_layer:
+#             xs = []
+#             x = x.reshape(x.shape[0], x.shape[1]//2, 2, x.shape[-2], x.shape[-1])
+#             theta = torch.tensor(2*np.pi/self.N).float()
+#             for i in range(self.N):
+#                 lift = torch.tensor([torch.cos(theta*i), torch.sin(theta*i)]).float().to(device)
+#                 lift_weights = torch.einsum("ab, b -> ab", self.transform_weights.repeat(1,2), lift)
+#                 xs.append(torch.einsum("abcde, bc -> abde", x, lift_weights).unsqueeze(2))
+#             xs = torch.cat(xs, dim = 2)
+#             xs = xs.reshape(xs.shape[0], xs.shape[1]*xs.shape[2], xs.shape[3], xs.shape[4])
+#         else:
+#             xs = x
         
-        conv_weights = torch.einsum("na, ab... -> nb...", self.combination_weights.to(self.weights.device), self.weights)
-        augmented_weights, augmented_biases = self.permute(conv_weights, self.bias) 
+#         conv_weights = torch.einsum("na, ab... -> nb...", self.combination_weights.to(self.weights.device), self.weights)
+#         augmented_weights, augmented_biases = self.permute(conv_weights, self.bias) 
         
-        out = F.conv2d(xs, augmented_weights, augmented_biases, padding = (self.kernel_size - 1)//2)
-        out = out.reshape(out.shape[0], self.N, self.out_reps*self.N, out.shape[-2], out.shape[-1]).mean(1)
-        if self.final_layer == True:
-            theta = torch.tensor(2*np.pi/self.N).float()
-            out = out.reshape(out.shape[0], self.out_reps, self.N, out.shape[-2], out.shape[-1])
-            out_u = torch.sum(torch.stack([out[:,:,i:i+1]*torch.cos(theta*i) for i in range(self.N)]), dim = 0)
-            out_v = torch.sum(torch.stack([out[:,:,i:i+1]*torch.sin(theta*i) for i in range(self.N)]), dim = 0)
-            out = torch.cat([out_u, out_v], dim  = 2)
-            out = torch.einsum("abcde, b -> abcde", out, self.final_w)
-            out = out.reshape(out.shape[0], self.out_reps*2, out.shape[-2], out.shape[-1])
-            return out
-        else:
-            return F.relu(out)#)self.batch_norm(
+#         out = F.conv2d(xs, augmented_weights, augmented_biases, padding = (self.kernel_size - 1)//2)
+#         out = out.reshape(out.shape[0], self.N, self.out_reps*self.N, out.shape[-2], out.shape[-1]).mean(1)
+#         if self.final_layer == True:
+#             theta = torch.tensor(2*np.pi/self.N).float()
+#             out = out.reshape(out.shape[0], self.out_reps, self.N, out.shape[-2], out.shape[-1])
+#             out_u = torch.sum(torch.stack([out[:,:,i:i+1]*torch.cos(theta*i) for i in range(self.N)]), dim = 0)
+#             out_v = torch.sum(torch.stack([out[:,:,i:i+1]*torch.sin(theta*i) for i in range(self.N)]), dim = 0)
+#             out = torch.cat([out_u, out_v], dim  = 2)
+#             out = torch.einsum("abcde, b -> abcde", out, self.final_w)
+#             out = out.reshape(out.shape[0], self.out_reps*2, out.shape[-2], out.shape[-1])
+#             return out
+#         else:
+#             return F.relu(out)#)self.batch_norm(
 
-class Relaxed_Reg_GroupConvNet(nn.Module):
-    def __init__(self, in_reps, out_reps, hidden_dim, kernel_size, num_layers, num_filter_banks, N):
-        super(Relaxed_Reg_GroupConvNet, self).__init__()     
+# class Relaxed_Reg_GroupConvNet(nn.Module):
+#     def __init__(self, in_reps, out_reps, hidden_dim, kernel_size, num_layers, num_filter_banks, N):
+#         super(Relaxed_Reg_GroupConvNet, self).__init__()     
         
-        layers = [Relaxed_Reg_GroupConv(in_reps = in_reps, out_reps = hidden_dim, kernel_size = kernel_size, 
-                                    N = N, num_filter_banks = num_filter_banks, first_layer = True, final_layer = False)]
+#         layers = [Relaxed_Reg_GroupConv(in_reps = in_reps, out_reps = hidden_dim, kernel_size = kernel_size, 
+#                                     N = N, num_filter_banks = num_filter_banks, first_layer = True, final_layer = False)]
         
-        layers += [Relaxed_Reg_GroupConv(in_reps = hidden_dim, out_reps = hidden_dim, kernel_size = kernel_size, 
-                                     N = N, num_filter_banks = num_filter_banks, first_layer = False, final_layer = False) for i in range(num_layers-2)]
+#         layers += [Relaxed_Reg_GroupConv(in_reps = hidden_dim, out_reps = hidden_dim, kernel_size = kernel_size, 
+#                                      N = N, num_filter_banks = num_filter_banks, first_layer = False, final_layer = False) for i in range(num_layers-2)]
         
-        layers += [Relaxed_Reg_GroupConv(in_reps = hidden_dim, out_reps = out_reps, kernel_size = kernel_size, 
-                                     N = N, num_filter_banks = num_filter_banks, first_layer = False, final_layer = True)]
+#         layers += [Relaxed_Reg_GroupConv(in_reps = hidden_dim, out_reps = out_reps, kernel_size = kernel_size, 
+#                                      N = N, num_filter_banks = num_filter_banks, first_layer = False, final_layer = True)]
         
-        self.rconv = nn.Sequential(*layers)
-    def rot_vector(self, inp, theta):
-        #inp shape: c x 2 x 64 x 64
-        theta = torch.tensor(theta).float().to(device)
-        rot_matrix = torch.tensor([[torch.cos(theta), -torch.sin(theta)], [torch.sin(theta), torch.cos(theta)]]).float().to(device)
-        out = torch.einsum("ab, bc... -> ac...",(rot_matrix, inp.transpose(0,1))).transpose(0,1)
-        return out
+#         self.rconv = nn.Sequential(*layers)
+#     def rot_vector(self, inp, theta):
+#         #inp shape: c x 2 x 64 x 64
+#         theta = torch.tensor(theta).float().to(device)
+#         rot_matrix = torch.tensor([[torch.cos(theta), -torch.sin(theta)], [torch.sin(theta), torch.cos(theta)]]).float().to(device)
+#         out = torch.einsum("ab, bc... -> ac...",(rot_matrix, inp.transpose(0,1))).transpose(0,1)
+#         return out
 
-    def rot_img(self, x, theta):
-        theta = torch.tensor(theta).float().to(device)
-        get_rot_mat = torch.tensor([[torch.cos(theta), -torch.sin(theta), 0],
-                             [torch.sin(theta), torch.cos(theta), 0]]).float().to(device)
-        rot_mat = get_rot_mat[None, ...].float().repeat(x.shape[0],1,1)
-        grid = F.affine_grid(rot_mat, x.size()).float()
-        x = F.grid_sample(x, grid)
-        return x.float()
+#     def rot_img(self, x, theta):
+#         theta = torch.tensor(theta).float().to(device)
+#         get_rot_mat = torch.tensor([[torch.cos(theta), -torch.sin(theta), 0],
+#                              [torch.sin(theta), torch.cos(theta), 0]]).float().to(device)
+#         rot_mat = get_rot_mat[None, ...].float().repeat(x.shape[0],1,1)
+#         grid = F.affine_grid(rot_mat, x.size()).float()
+#         x = F.grid_sample(x, grid)
+#         return x.float()
                   
-    def forward(self, x):
-        return self.rconv(x)
+#     def forward(self, x):
+#         return self.rconv(x)
     
 
  
